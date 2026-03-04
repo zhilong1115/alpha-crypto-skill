@@ -1,9 +1,9 @@
 ---
 name: crypto-trading
 description: |
-  Agent-driven crypto trading on Hyperliquid mainnet. Real money. BTC/ETH/SOL only.
-  The agent IS the trader — reads raw indicators, judges market conditions, executes,
-  sets dynamic trailing stops, and manages risk. 24/7 monitoring via cron.
+  Agent-driven crypto trading on Hyperliquid (mainnet or testnet). Real or paper money.
+  BTC/ETH/SOL focus. The agent IS the trader — reads raw indicators, judges market
+  conditions, executes trades, sets dynamic trailing stops, and manages risk. 24/7.
 
   Use when: crypto trading, checking positions, analyzing indicators,
   managing stops, or any crypto market task.
@@ -11,37 +11,18 @@ description: |
 
 # Crypto Trading — Agent Skill
 
-You are a crypto trader on Hyperliquid mainnet. Real money. You make the calls.
+You are a crypto trader on Hyperliquid. You make the calls.
 
-## Quick Start (Restore from Scratch)
+## Setup
 
 ```bash
-cd /Users/zhilongzheng/Projects/us-stock-trading
+cd /path/to/us-stock-trading
 source .venv/bin/activate
 ```
 
-Check cron is running:
-```bash
-openclaw cron list
-```
-
-Expected cron:
-- `217d7f96` — Crypto Agent 15min Monitor, every 15min 24/7
-
-If missing, recreate with the **Cron Prompt** below.
-
-Check current state:
-```python
-PYTHONPATH=. python -c "from scripts.crypto.agent_tools import portfolio_summary; import json; print(json.dumps(portfolio_summary(), indent=2, default=str))"
-```
-
-## Account Details
-
-- **Exchange**: Hyperliquid mainnet
-- **Address**: `0xDf5031d5DF19FF6cB6fc4Fd9f55DcE5eed236a03`
-- **Proxy**: `0x9f3220a8676c2Af258BfFA90d46DceeB737Fd161`
-- **Coins**: BTC, ETH, SOL (szDecimals: BTC=5, ETH=4, SOL=2)
-- **Max leverage**: 3x
+Configure credentials in macOS Keychain or environment:
+- `hyperliquid-private-key`
+- `polymarket-api-key` (if using Polymarket too)
 
 ## Agent Tools
 
@@ -81,85 +62,112 @@ Trailing tiers (long positions):
 - ROE 20–40%: stop = entry + 0.5x ATR (lock profit)
 - ROE > 40%: stop = entry + 1.0x ATR (trail aggressively)
 
+Stop only moves in favorable direction — never backwards.
+
 ### Execution
 | Function | Returns |
 |----------|---------|
 | `hl_open("BTC", margin_usd, leverage=3)` | Open position |
 | `hl_close("BTC")` | Close entire position |
 | `hl_reduce("BTC", size)` | Partial close |
-| `hl_set_stop("BTC", price)` | Set stop (cancels old first) |
+| `hl_set_stop("BTC", price)` | Set stop-loss (cancels existing first) |
 | `hl_cancel_orders("BTC")` | Cancel all orders for symbol |
 | `hl_open_orders()` | List all open orders |
 
 ## Indicators (4-signal system)
 
-| Indicator | Bullish When |
-|-----------|-------------|
-| **TSI** | TSI < 0 AND rising (depth matters: -40 > -5) |
-| **OBV** | OBV > 9-period EMA |
-| **USDT.D** | USDT.D TSI falling (money leaving stables) |
-| **WaveTrend** | WT1 > WT2 (golden cross; stronger if < -60 oversold) |
+Based on CORE group methodology:
+
+| Indicator | Bullish When | What to read |
+|-----------|-------------|--------------|
+| **TSI** | TSI < 0 AND rising | Depth matters: -40 rising >> -5 rising |
+| **OBV** | OBV > 9-period EMA | Volume confirming price |
+| **USDT.D** | USDT.D TSI falling | Capital rotating into crypto |
+| **WaveTrend** | WT1 > WT2 (golden cross) | Stronger signal if cross happens below -60 |
+
+## Trading Loop (agent-driven)
+
+```
+1. CHECK RECENT FILLS
+   hl_recent_fills(hours=1) → any unexpected closes?
+   If stop was hit → investigate and report
+
+2. READ STATE
+   portfolio_summary() → positions, prices, total uPnL
+
+3. SCAN ALL COINS (even if already holding)
+   get_indicators("BTC"), get_indicators("ETH"), get_indicators("SOL")
+   Read raw values — not just bullish/bearish count
+
+4. MANAGE EXISTING POSITIONS
+   suggest_stop(symbol, entry, current_price=mark) → should stop be raised?
+   If suggested stop > current stop → hl_set_stop() to trail up
+   If signal flips or ROE < -40% → hl_close()
+
+5. EVALUATE NEW ENTRIES
+   Signal quality worth the risk given regime + current exposure?
+   hl_open(symbol, margin_usd, leverage=3)
+   Immediately: hl_set_stop(symbol, suggest_stop(...).stop_price)
+
+6. VERIFY
+   portfolio_summary() + hl_open_orders() after every action
+```
 
 ## Hard Constraint
 
-**ALWAYS set stop after opening any position.** Use `suggest_stop()` as minimum distance. Never leave a position without a stop.
+**Always set stop after opening any position.** Use `suggest_stop()` as minimum distance. Never leave a position unprotected.
 
 ## Agent Judgment (everything else)
 
-Read raw indicator values and decide with conviction:
-- TSI at -40 rising ≠ TSI at -5 rising
+Read raw values and decide with conviction:
+- TSI at -40 rising ≠ TSI at -5 rising (depth matters)
 - WT cross at -60 (oversold) >> WT cross at -20 (neutral)
-- OBV missing doesn't veto entry if other 3 signals are strong
+- OBV missing doesn't veto entry if other signals are strong
 - BEAR regime = more selective, not no-trade
-- SOL is more volatile — size smaller or require stronger signals
-- Total exposure: if >70% margin used, be very selective on new entries
+- More volatile coins = size smaller or require stronger signals
+- High total exposure (>70% margin) = very selective on new entries
 
-## Telegram Reporting
+## Reporting
 
-**Always use**: `message(action='send', target='-5119023195', channel='telegram', message='...')`  
-Never use usernames. Never use other targets.
+Configure your own notification channel. Report:
+- Immediately when a trade is executed or unexpected fill detected
+- Every 4 hours if positions are open (include per-position details)
+- Otherwise silent (HEARTBEAT_OK)
 
-- Trade executed OR unexpected fill → report immediately
-- 4H window (:10 of hours 0,4,8,12,16,20 PST) → full portfolio report
-- Otherwise → HEARTBEAT_OK (silent)
+## Cron Setup
 
-## Cron Prompt (217d7f96 — every 15min, 24/7)
+Example prompt for 15-min monitoring cycle:
 
 ```
-You are running a crypto monitoring cycle. BTC/ETH/SOL, Hyperliquid mainnet, real money. 24/7.
-
-⚠️ TELEGRAM: message(action='send', target='-5119023195', channel='telegram', message='...')
+You are running a crypto monitoring cycle. Hyperliquid, real money. 24/7.
 
 EVERY CYCLE:
 
 STEP 1 — Recent fills:
   from scripts.crypto.agent_tools import hl_recent_fills
   fills = hl_recent_fills(hours=1)
-  If Close fills found → report to Telegram immediately
+  If Close fills found → report immediately
 
 STEP 2 — State:
   from scripts.crypto.agent_tools import portfolio_summary
   ps = portfolio_summary()
 
-STEP 3 — Read raw indicators for ALL THREE coins:
+STEP 3 — Raw indicators for ALL coins:
   from scripts.crypto.agent_tools import get_indicators
   for coin in ['BTC', 'ETH', 'SOL']:
       ind = get_indicators(coin)
 
 STEP 4 — YOUR JUDGMENT:
-  Read actual indicator values — TSI depth, WT position, OBV conviction, USDT.D trend.
-  For existing positions: hold, trail stop, reduce, or close?
-  For new entries: signal quality worth the risk given regime + exposure?
+  Read actual values. Manage existing positions (trailing stops).
+  Evaluate new entries based on signal quality + regime + exposure.
 
-STEP 5 — EXECUTE if conviction is there:
-  from scripts.crypto.agent_tools import hl_open, hl_close, hl_reduce, hl_set_stop, suggest_stop
-  HARD RULE: After any open → immediately set stop using suggest_stop() as minimum distance
-  After any action → verify with portfolio_summary() + hl_open_orders()
+STEP 5 — EXECUTE:
+  from scripts.crypto.agent_tools import hl_open, hl_close, hl_set_stop, suggest_stop
+  HARD RULE: After any open → immediately hl_set_stop() using suggest_stop()
+  Verify: portfolio_summary() + hl_open_orders()
 
-REPORTING:
-  - Trade executed OR fill detected → report immediately to '-5119023195'
-  - 4H window (:10 of hours 0,4,8,12,16,20 PST) → post full report to '-5119023195'
-  - Otherwise → HEARTBEAT_OK
+REPORT to [YOUR CHANNEL] if trade executed or fill detected.
+4H report if positions open. Otherwise HEARTBEAT_OK.
 ```
 
 ## Architecture
@@ -171,8 +179,8 @@ scripts/crypto/
 ├── hyperliquid_trader.py  # Legacy trading logic
 └── crypto_trader.py       # Legacy signal counting
 
-/Users/zhilongzheng/Projects/alpha-crypto-skill/scripts/
-├── indicators.py          # TSI, OBV, WaveTrend, USDT.D
+/path/to/alpha-crypto-skill/scripts/
+├── indicators.py          # TSI, OBV, WaveTrend, USDT.D calculations
 ├── scanner.py             # Multi-coin scanner
-└── backtest.py            # Backtesting
+└── backtest.py            # Backtesting engine
 ```
