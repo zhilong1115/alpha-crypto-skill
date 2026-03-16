@@ -51,18 +51,15 @@ PYTHONPATH=. python -c "from scripts.crypto.agent_tools import *; ..."
 | `get_funding_rates()` | Current funding rates |
 | `get_ohlcv("BTC", timeframe="4h", days=30)` | OHLCV DataFrame |
 
-### Dynamic Stop
+### Stop Management
 | Function | Returns |
 |----------|---------|
-| `suggest_stop("BTC", entry, current_price=mark)` | Trailing stop recommendation |
+| `stop_context("BTC", entry_price, side, current_price, current_stop)` | Raw stop data — agent decides placement |
+| `suggest_stop("BTC", entry, current_price=mark)` | **Deprecated** — backward-compat alias for stop_context |
 
-Trailing tiers (long positions):
-- ROE < 10%: stop = entry − 1.5x ATR (protect capital)
-- ROE 10–20%: stop = entry − 0.5x ATR (near breakeven)
-- ROE 20–40%: stop = entry + 0.5x ATR (lock profit)
-- ROE > 40%: stop = entry + 1.0x ATR (trail aggressively)
+`stop_context()` returns raw data: current prices, ATR, PnL%, reference levels (breakeven, entry±ATR, current±ATR), current stop info, and indicators. **The agent decides where to place the stop** — no hardcoded tiers.
 
-Stop only moves in favorable direction — never backwards.
+Philosophy: agent has full authority over stop placement, sizing, and leverage. No hardcoded rules.
 
 ### Execution
 | Function | Returns |
@@ -100,14 +97,15 @@ Based on CORE group methodology:
    Read raw values — not just bullish/bearish count
 
 4. MANAGE EXISTING POSITIONS
-   suggest_stop(symbol, entry, current_price=mark) → should stop be raised?
-   If suggested stop > current stop → hl_set_stop() to trail up
-   If signal flips or ROE < -40% → hl_close()
+   stop_context(symbol, entry, side, current_price, current_stop) → raw data to decide stop
+   Read ATR, PnL%, reference levels → decide if/where to move stop
+   If stop should move → hl_set_stop() to update
+   If signal flips or position deeply underwater → hl_close()
 
 5. EVALUATE NEW ENTRIES
    Signal quality worth the risk given regime + current exposure?
    hl_open(symbol, margin_usd, leverage=3)
-   Immediately: hl_set_stop(symbol, suggest_stop(...).stop_price)
+   Immediately: use stop_context() to inform stop placement → hl_set_stop(symbol, price)
 
 6. VERIFY
    portfolio_summary() + hl_open_orders() after every action
@@ -115,7 +113,7 @@ Based on CORE group methodology:
 
 ## Hard Constraint
 
-**Always set stop after opening any position.** Use `suggest_stop()` as minimum distance. Never leave a position unprotected.
+**Always set stop after opening any position.** Use `stop_context()` to inform placement — agent decides the level. Never leave a position unprotected.
 
 ## Agent Judgment (everything else)
 
@@ -131,7 +129,7 @@ Read raw values and decide with conviction:
 
 Configure your own notification channel. Report:
 - Immediately when a trade is executed or unexpected fill detected
-- Every 4 hours if positions are open (include per-position details)
+- Every 15-min cycle: check stops for open positions (stop_context → adjust if needed)
 - Otherwise silent (HEARTBEAT_OK)
 
 ## Cron Setup
@@ -158,16 +156,18 @@ STEP 3 — Raw indicators for ALL coins:
       ind = get_indicators(coin)
 
 STEP 4 — YOUR JUDGMENT:
-  Read actual values. Manage existing positions (trailing stops).
+  Read actual values. Manage existing positions (stops every cycle).
   Evaluate new entries based on signal quality + regime + exposure.
+  Agent has full authority — no hardcoded tiers for stops, sizing, or leverage.
 
 STEP 5 — EXECUTE:
-  from scripts.crypto.agent_tools import hl_open, hl_close, hl_set_stop, suggest_stop
-  HARD RULE: After any open → immediately hl_set_stop() using suggest_stop()
+  from scripts.crypto.agent_tools import hl_open, hl_close, hl_set_stop, stop_context
+  HARD RULE: After any open → immediately use stop_context() to decide stop → hl_set_stop()
+  For existing positions: stop_context() → decide if stop should move → hl_set_stop() if yes
   Verify: portfolio_summary() + hl_open_orders()
 
 REPORT to [YOUR CHANNEL] if trade executed or fill detected.
-4H report if positions open. Otherwise HEARTBEAT_OK.
+Report if positions open (per 15-min cycle check). Otherwise HEARTBEAT_OK.
 ```
 
 ## Architecture
